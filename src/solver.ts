@@ -97,21 +97,21 @@ async function pdfToImages(filePath: string): Promise<string[]> {
 async function answerWithVision(base64Images: string[]): Promise<AnsweredQuestion[]> {
   console.log(`[solver] A usar modalidade: vision (${base64Images.length} imagens)`);
 
-  // A Responses API espera input como array de items do tipo "message"
-  // com role + content (array de blocos text / image_url)
-  type TextBlock = { type: 'text'; text: string };
-  type ImageBlock = { type: 'image_url'; image_url: { url: string } };
-  type ContentBlock = TextBlock | ImageBlock;
+  // Responses API: message com role:user e content com blocos input_text / input_image
+  // https://platform.openai.com/docs/api-reference/responses/create
+  type InputTextBlock  = { type: 'input_text';  text: string };
+  type InputImageBlock = { type: 'input_image'; image_url: string };
+  type ContentBlock = InputTextBlock | InputImageBlock;
 
   const content: ContentBlock[] = [
     {
-      type: 'text',
+      type: 'input_text',
       text: 'O documento com as questões encontra-se nas imagens seguintes. Responde às questões.',
     },
     ...base64Images.map(
-      (b64): ImageBlock => ({
-        type: 'image_url',
-        image_url: { url: `data:image/png;base64,${b64}` },
+      (b64): InputImageBlock => ({
+        type: 'input_image',
+        image_url: `data:image/png;base64,${b64}`,
       })
     ),
   ];
@@ -141,9 +141,9 @@ function parseResponse(raw: string): AnsweredQuestion[] {
   const p = parsed as Record<string, unknown>;
   const arr: AnsweredQuestion[] = Array.isArray(parsed)
     ? parsed
-    : Array.isArray(p['answers']) ? (p['answers'] as AnsweredQuestion[])
+    : Array.isArray(p['answers'])   ? (p['answers']   as AnsweredQuestion[])
     : Array.isArray(p['questions']) ? (p['questions'] as AnsweredQuestion[])
-    : Array.isArray(p['results']) ? (p['results'] as AnsweredQuestion[])
+    : Array.isArray(p['results'])   ? (p['results']   as AnsweredQuestion[])
     : [];
 
   if (arr.length === 0) {
