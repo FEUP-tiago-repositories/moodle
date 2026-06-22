@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "dotenv": "^16.4.5",
-    "nodemailer": "^6.9.14",
+    "resend": "^4.5.2",
     "playwright": "^1.53.2"
   },
   "devDependencies": {
