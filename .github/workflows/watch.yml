@@ -60,6 +60,15 @@ jobs:
             state.json
           key: moodle-session-${{ github.ref_name }}-${{ github.run_id }}
 
+      - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: debug/
+          retention-days: 1
+          if-no-files-found: ignore
+
       - name: Upload state artifact (24h)
         if: always()
         uses: actions/upload-artifact@v4
