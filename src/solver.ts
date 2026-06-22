@@ -1,20 +1,24 @@
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import OpenAI from 'openai';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
+import { fromPath } from 'pdf2pic';
 import { config } from './config.js';
 
 const client = new OpenAI({ apiKey: config.openaiApiKey });
 
-/**
- * Extrai o texto de um ficheiro PDF.
- */
-export async function extractTextFromPdf(filePath: string): Promise<string> {
-  const buffer = await fs.readFile(filePath);
-  const data = await pdfParse(buffer);
-  const text = data.text.trim();
-  console.log(`[solver] Texto extraído do PDF (${text.length} chars)`);
-  return text;
-}
+const SYSTEM_PROMPT = `
+És um assistente académico especializado em responder a questões de testes e exames universitários.
+Quando recebes um documento com questões (texto e/ou imagens), deves:
+1. Identificar cada questão individualmente (numeradas ou não).
+2. Responder a cada uma de forma clara, detalhada e correta.
+3. Se houver escolha múltipla, indica a opção correta e explica porquê.
+4. Se houver questões de desenvolvimento, fornece uma resposta estruturada e completa.
+5. Devolver EXCLUSIVAMENTE JSON válido, sem texto antes ou depois.
+
+Formato obrigatório:
+{ "answers": [ { "question": "...", "answer": "..." } ] }
+`.trim();
 
 export type AnsweredQuestion = {
   question: string;
@@ -22,62 +26,129 @@ export type AnsweredQuestion = {
 };
 
 /**
- * Envia o texto do PDF para a LLM e obtém as respostas às questões.
- * Devolve um array estruturado com cada questão e a respetiva resposta.
+ * Pipeline principal: tenta extrair texto do PDF;
+ * se o texto for escasso (PDF de imagens), converte páginas em imagens
+ * e envia-as para a LLM via vision.
  */
-export async function answerQuestions(pdfText: string): Promise<AnsweredQuestion[]> {
-  console.log('[solver] A enviar questões para a LLM...');
+export async function answerQuestionsFromPdf(filePath: string): Promise<AnsweredQuestion[]> {
+  const pdfText = await extractText(filePath);
+  const hasUsableText = pdfText.length > 100;
+  console.log(`[solver] Texto extraído: ${pdfText.length} chars | Vision necessário: ${!hasUsableText}`);
 
-  const systemPrompt = `
-És um assistente académico especializado em responder a questões de testes e exames universitários.
-Quando recebes um documento com questões, deves:
-1. Identificar cada questão individualmente (numeradas ou não).
-2. Responder a cada uma de forma clara, detalhada e correta.
-3. Devolver a resposta EXCLUSIVAMENTE em formato JSON válido, sem texto adicional antes ou depois.
+  if (hasUsableText) {
+    return answerWithText(pdfText);
+  } else {
+    const images = await pdfToImages(filePath);
+    return answerWithVision(images);
+  }
+}
 
-Formato de resposta obrigatório:
-[
-  { "question": "Texto da questão 1", "answer": "Resposta completa à questão 1" },
-  { "question": "Texto da questão 2", "answer": "Resposta completa à questão 2" }
-]
+// ---------------------------------------------------------------------------
+// Extracção de texto
+// ---------------------------------------------------------------------------
 
-Se o documento contiver escolha múltipla, indica a opção correta e explica porquê.
-Se contiver questões de desenvolvimento, fornece uma resposta estruturada e completa.
-`.trim();
+async function extractText(filePath: string): Promise<string> {
+  const buffer = await fs.readFile(filePath);
+  const data = await pdfParse(buffer);
+  return data.text.trim();
+}
 
-  const userPrompt = `Aqui está o conteúdo do documento com as questões:\n\n${pdfText}`;
+// ---------------------------------------------------------------------------
+// Modalidade texto
+// ---------------------------------------------------------------------------
 
-  const response = await client.chat.completions.create({
+async function answerWithText(pdfText: string): Promise<AnsweredQuestion[]> {
+  console.log('[solver] A usar modalidade: texto');
+
+  const response = await client.responses.create({
     model: config.openaiModel,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ],
-    temperature: 0.2,
-    response_format: { type: 'json_object' },
+    instructions: SYSTEM_PROMPT,
+    input: `Aqui está o conteúdo do documento com as questões:\n\n${pdfText}`,
   });
 
-  const raw = response.choices[0]?.message?.content ?? '{}';
-  console.log('[solver] Resposta da LLM recebida.');
+  return parseResponse(response.output_text);
+}
 
+// ---------------------------------------------------------------------------
+// Modalidade vision (PDF de imagens)
+// ---------------------------------------------------------------------------
+
+async function pdfToImages(filePath: string): Promise<string[]> {
+  const outputDir = path.join(path.dirname(filePath), 'pdf-pages');
+  await fs.mkdir(outputDir, { recursive: true });
+
+  const converter = fromPath(filePath, {
+    density: 150,          // DPI suficiente para texto legível
+    saveFilename: 'page',
+    savePath: outputDir,
+    format: 'png',
+    width: 1200,
+  });
+
+  // Converter todas as páginas (-1 = todas)
+  const results = await converter.bulk(-1, { responseType: 'base64' });
+  const base64Images = results
+    .filter((r) => r.base64)
+    .map((r) => r.base64 as string);
+
+  console.log(`[solver] ${base64Images.length} página(s) do PDF convertida(s) em imagem.`);
+  return base64Images;
+}
+
+async function answerWithVision(base64Images: string[]): Promise<AnsweredQuestion[]> {
+  console.log(`[solver] A usar modalidade: vision (${base64Images.length} imagens)`);
+
+  // Construir o array de input com todas as páginas como image_url
+  type InputBlock =
+    | { type: 'input_text'; text: string }
+    | { type: 'input_image'; image_url: string };
+
+  const inputBlocks: InputBlock[] = [
+    {
+      type: 'input_text',
+      text: 'O documento com as questões encontra-se nas imagens seguintes. Responde às questões.',
+    },
+    ...base64Images.map(
+      (b64): InputBlock => ({
+        type: 'input_image',
+        image_url: `data:image/png;base64,${b64}`,
+      })
+    ),
+  ];
+
+  const response = await client.responses.create({
+    model: config.openaiModel,
+    instructions: SYSTEM_PROMPT,
+    input: inputBlocks as Parameters<typeof client.responses.create>[0]['input'],
+  });
+
+  return parseResponse(response.output_text);
+}
+
+// ---------------------------------------------------------------------------
+// Parser da resposta JSON da LLM
+// ---------------------------------------------------------------------------
+
+function parseResponse(raw: string): AnsweredQuestion[] {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    // Remover possível markdown code block (```json ... ```)
+    const clean = raw.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+    parsed = JSON.parse(clean);
   } catch {
-    throw new Error(`A LLM devolveu JSON inválido: ${raw.slice(0, 200)}`);
+    throw new Error(`A LLM devolveu JSON inválido:\n${raw.slice(0, 300)}`);
   }
 
-  // A LLM pode devolver { "questions": [...] } ou diretamente [...]
+  const p = parsed as Record<string, unknown>;
   const arr: AnsweredQuestion[] = Array.isArray(parsed)
     ? parsed
-    : Array.isArray((parsed as Record<string, unknown>)['questions'])
-      ? ((parsed as Record<string, unknown>)['questions'] as AnsweredQuestion[])
-      : Array.isArray((parsed as Record<string, unknown>)['answers'])
-        ? ((parsed as Record<string, unknown>)['answers'] as AnsweredQuestion[])
-        : [];
+    : Array.isArray(p['answers']) ? (p['answers'] as AnsweredQuestion[])
+    : Array.isArray(p['questions']) ? (p['questions'] as AnsweredQuestion[])
+    : Array.isArray(p['results']) ? (p['results'] as AnsweredQuestion[])
+    : [];
 
   if (arr.length === 0) {
-    throw new Error(`Não foi possível extrair questões/respostas do JSON: ${raw.slice(0, 400)}`);
+    throw new Error(`Nenhuma questão/resposta encontrada no JSON:\n${raw.slice(0, 400)}`);
   }
 
   console.log(`[solver] ${arr.length} questão(ões) respondida(s).`);
