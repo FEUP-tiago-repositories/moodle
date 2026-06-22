@@ -78,14 +78,13 @@ async function pdfToImages(filePath: string): Promise<string[]> {
   await fs.mkdir(outputDir, { recursive: true });
 
   const converter = fromPath(filePath, {
-    density: 150,          // DPI suficiente para texto legível
+    density: 150,
     saveFilename: 'page',
     savePath: outputDir,
     format: 'png',
     width: 1200,
   });
 
-  // Converter todas as páginas (-1 = todas)
   const results = await converter.bulk(-1, { responseType: 'base64' });
   const base64Images = results
     .filter((r) => r.base64)
@@ -98,20 +97,21 @@ async function pdfToImages(filePath: string): Promise<string[]> {
 async function answerWithVision(base64Images: string[]): Promise<AnsweredQuestion[]> {
   console.log(`[solver] A usar modalidade: vision (${base64Images.length} imagens)`);
 
-  // Construir o array de input com todas as páginas como image_url
-  type InputBlock =
-    | { type: 'input_text'; text: string }
-    | { type: 'input_image'; image_url: string };
+  // A Responses API espera input como array de items do tipo "message"
+  // com role + content (array de blocos text / image_url)
+  type TextBlock = { type: 'text'; text: string };
+  type ImageBlock = { type: 'image_url'; image_url: { url: string } };
+  type ContentBlock = TextBlock | ImageBlock;
 
-  const inputBlocks: InputBlock[] = [
+  const content: ContentBlock[] = [
     {
-      type: 'input_text',
+      type: 'text',
       text: 'O documento com as questões encontra-se nas imagens seguintes. Responde às questões.',
     },
     ...base64Images.map(
-      (b64): InputBlock => ({
-        type: 'input_image',
-        image_url: `data:image/png;base64,${b64}`,
+      (b64): ImageBlock => ({
+        type: 'image_url',
+        image_url: { url: `data:image/png;base64,${b64}` },
       })
     ),
   ];
@@ -119,7 +119,7 @@ async function answerWithVision(base64Images: string[]): Promise<AnsweredQuestio
   const response = await client.responses.create({
     model: config.openaiModel,
     instructions: SYSTEM_PROMPT,
-    input: inputBlocks as Parameters<typeof client.responses.create>[0]['input'],
+    input: [{ role: 'user', content }] as Parameters<typeof client.responses.create>[0]['input'],
   });
 
   return parseResponse(response.output_text);
@@ -132,7 +132,6 @@ async function answerWithVision(base64Images: string[]): Promise<AnsweredQuestio
 function parseResponse(raw: string): AnsweredQuestion[] {
   let parsed: unknown;
   try {
-    // Remover possível markdown code block (```json ... ```)
     const clean = raw.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
     parsed = JSON.parse(clean);
   } catch {
