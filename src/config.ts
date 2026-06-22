@@ -21,4 +21,6 @@ export const config = {
   emailFrom: must('EMAIL_FROM'),
   emailTo: must('EMAIL_TO'),
   emailSubject: must('EMAIL_SUBJECT'),
+  openaiApiKey: must('OPENAI_API_KEY'),
+  openaiModel: process.env.OPENAI_MODEL || 'gpt-4o',
 };
