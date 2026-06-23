@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # Run every 10 minutes (*/10 means every 10 minutes, * means every hour/day/month/day-of-week)
-    - cron: '*/10 * * * *'
+    - cron: '*/5 * * * *'
 
 jobs:
   watch:
